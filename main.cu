@@ -36,8 +36,7 @@
 #include "structs.cuh"
 #include "utils.cuh"
 #include "inverted_index.cuh"
-#include "knn.cuh"
-#include "cuda_distances.cuh"
+#include "simjoin.cuh"
 
 
 #define OUTPUT 1
