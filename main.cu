@@ -1,6 +1,6 @@
 /*********************************************************************
 11
-12	 Copyright (C) 2015 by Wisllay Vitrio
+12	 Copyright (C) 2016 by Sidney Ribeiro Junior
 13
 14	 This program is free software; you can redistribute it and/or modify
 15	 it under the terms of the GNU General Public License as published by
@@ -49,16 +49,15 @@ struct FileStats {
 	int num_docs;
 	int num_terms;
 
-	vector<int> sizes; // tamanho dos conjuntos
+	vector<int> sizes; // set sizes
 	map<int, int> doc_to_class;
-	vector<int> start; // onde cada conjunto começa em entries
+	vector<int> start; // beginning of each entrie
 
 	FileStats() : num_docs(0), num_terms(0) {}
 };
 
 FileStats readInputFile(string &file, vector<Entry> &entries);
-void processTestFile(InvertedIndex &index, FileStats &stats, string &file, float threshold,
-		string distance, stringstream &fileout);
+void processTestFile(InvertedIndex &index, FileStats &stats, string &file, float threshold, stringstream &fileout);
 
 
 /**
@@ -71,16 +70,16 @@ int biggestQuerySize = -1;
 
 int main(int argc, char **argv) {
 
-	if (argc != 6) {
-		cerr << "Wrong parameters. Correct usage: <executable> <input_file> <threshold> <cosine | l2 | l1> <output_file> <number_of_gpus>" << endl;
+	if (argc != 5) {
+		cerr << "Wrong parameters. Correct usage: <executable> <input_file> <threshold> <output_file> <number_of_gpus>" << endl;
 		exit(1);
 	}
 
 	int gpuNum;
 	cudaGetDeviceCount(&gpuNum);
 
-	if (gpuNum > atoi(argv[5])){
-		gpuNum = atoi(argv[5]);
+	if (gpuNum > atoi(argv[4])){
+		gpuNum = atoi(argv[4]);
 		if (gpuNum < 1)
 			gpuNum = 1;
 	}
@@ -93,10 +92,10 @@ int main(int argc, char **argv) {
 
 #if OUTPUT
 	//truncate output files
-	ofstream ofsf(argv[4], ofstream::trunc);
+	ofstream ofsf(argv[3], ofstream::trunc);
 	ofsf.close();
 
-	ofstream ofsfileoutput(argv[4], ofstream::out | ofstream::app);
+	ofstream ofsfileoutput(argv[3], ofstream::out | ofstream::app);
 #endif
 	vector<string> inputs;// to read the whole test file in memory
 	vector<InvertedIndex> indexes;
@@ -143,12 +142,10 @@ int main(int argc, char **argv) {
 		cudaSetDevice(cpuid / NUM_STREAMS);
 
 		float threshold = atof(argv[2]);
-		string distanceFunction(argv[3]);
 
 		FileStats lstats = stats;
 
-		processTestFile(indexes[cpuid / NUM_STREAMS], lstats, inputFileName, threshold,
-			distanceFunction, *outputString[cpuid]);
+		processTestFile(indexes[cpuid / NUM_STREAMS], lstats, inputFileName, threshold, *outputString[cpuid]);
 		if (cpuid %  NUM_STREAMS == 0)
 			gpuAssert(cudaDeviceReset());
 
@@ -186,7 +183,7 @@ FileStats readInputFile(string &filename, vector<Entry> &entries) {
 
 		int size = (tokens.size() - 2)/2;
 		stats.sizes.push_back(size);
-		stats.start.push_back(accumulatedsize); // TODO: salvar na stats ou outro lugar
+		stats.start.push_back(accumulatedsize);
 		accumulatedsize += size;
 
 		for (int i = 2, size = tokens.size(); i + 1 < size; i += 2) {
@@ -217,8 +214,6 @@ void allocVariables(DeviceVariables *dev_vars, float threshold, int num_docs, Si
 	gpuAssert(cudaMalloc(&dev_vars->d_query, biggestQuerySize * sizeof(Entry))); // query
 	gpuAssert(cudaMalloc(&dev_vars->d_index, biggestQuerySize * sizeof(int)));
 	gpuAssert(cudaMalloc(&dev_vars->d_count, biggestQuerySize * sizeof(int)));
-	//gpuAssert(cudaMalloc(&dev_vars->d_qnorms, 2 * sizeof(float)));
-	//gpuAssert(cudaMalloc(&dev_vars->d_similars, num_docs * 2 * sizeof(float)));
 
 	*distances = (Similarity*)malloc(num_docs * sizeof(Similarity));
 
@@ -238,8 +233,6 @@ void freeVariables(DeviceVariables *dev_vars, InvertedIndex &index, Similarity**
 	cudaFree(dev_vars->d_query);
 	cudaFree(dev_vars->d_index);
 	cudaFree(dev_vars->d_count);
-	//cudaFree(dev_vars->d_qnorms);
-	//cudaFree(dev_vars->d_similars);
 	cudaFree(dev_vars->d_bC);
 	cudaFree(dev_vars->d_bO);
 
@@ -254,8 +247,7 @@ void freeVariables(DeviceVariables *dev_vars, InvertedIndex &index, Similarity**
 	}
 }
 
-void processTestFile(InvertedIndex &index, FileStats &stats, string &filename, float threshold,
-		string distance, stringstream &outputfile) {
+void processTestFile(InvertedIndex &index, FileStats &stats, string &filename, float threshold, stringstream &outputfile) {
 
 	int num_test_local = 0, docid;
 
@@ -271,20 +263,19 @@ void processTestFile(InvertedIndex &index, FileStats &stats, string &filename, f
 
 	double start = gettime();
 
-	#pragma omp for
+#pragma omp for
 	for (docid = 0; docid < index.num_docs - 1; docid++){
 
 		num_test_local++;
 
-		if (distance == "cosine" || distance == "both") {
-			int totalSimilars = findSimilars(index, threshold, &dev_vars, distances, docid, stats.start[docid], stats.sizes[docid]);
+		int totalSimilars = findSimilars(index, threshold, &dev_vars, distances, docid, stats.start[docid], stats.sizes[docid]);
 
-			for (int i = 0; i < totalSimilars; i++) {
+		for (int i = 0; i < totalSimilars; i++) {
 #if OUTPUT
-				outputfile << "(" << docid << ", " << distances[i].doc_id << "): " << distances[i].distance << endl;
+			outputfile << "(" << docid << ", " << distances[i].doc_id << "): " << distances[i].distance << endl;
 #endif
-			}
 		}
+
 	}
 
 	freeVariables(&dev_vars, index, &distances);
@@ -295,9 +286,6 @@ void processTestFile(InvertedIndex &index, FileStats &stats, string &filename, f
 	#pragma omp barrier
 
 	double end = gettime();
-
-	//#pragma omp master
-	//printf("Total num tests %d\n", num_tests);
 
 	#pragma omp master
 	{

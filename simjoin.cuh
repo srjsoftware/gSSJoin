@@ -34,7 +34,6 @@ __global__ void calculateDistances(InvertedIndex inverted_index, Entry *d_query,
 
 __global__ void bitonicPartialSort(Similarity *dist, Similarity *nearestK, int N, int K);
 
-//__global__ void get_term_count_and_tf_idf(InvertedIndex inverted_index, Entry *query, int *count, float *qnorm, float *qnorml1, int N);
 __global__ void get_term_count_and_tf_idf(InvertedIndex inverted_index, Entry *query, int *count, int N);
 
 __host__ int findSimilars(InvertedIndex inverted_index, float threshold, struct DeviceVariables *dev_vars, Similarity* distances,
