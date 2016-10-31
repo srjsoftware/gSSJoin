@@ -129,6 +129,51 @@ __global__ void calculateJaccardSimilarity(InvertedIndex inverted_index, Entry *
 }
 
 
+__global__ void calculateIntersection(InvertedIndex inverted_index, Entry *d_query, Similarity *d_candidates, int begin, int query_qtt,
+		int *docstart, int *docsizes, float threshold) {
+
+	int block_start, block_end, docid, size, maxsize;
+
+	for (int q = 0; q < query_qtt && q < inverted_index.num_docs - 1; q++) { // percorre as queries
+
+		docid = begin + q;
+		size = docsizes[docid];
+		maxsize = ceil(((float) size)/threshold);
+
+	/*	for (int idx = blockIdx.x; idx < size; idx += gridDim.x) { // percorre os termos da query (apenas os que estão no midprefix)
+
+			Entry entry = d_query[idx + docstart[docid]]; // find the term
+
+			block_start = entry.term_id == 0 ? 0 : inverted_index.d_index[entry.term_id-1];
+			block_end = inverted_index.d_index[entry.term_id];
+
+			for (int i = block_start + threadIdx.x; i < block_end; i += blockDim.x) { // percorre os documentos que tem aquele termo
+
+				Entry index_entry = inverted_index.d_inverted_index[i]; // obter item
+				int entry_size = docsizes[index_entry.doc_id];
+				Similarity *sim = &d_candidates[q*inverted_index.num_docs + index_entry.doc_id];
+
+				// somar na distância
+				if (index_entry.doc_id > docid && entry_size <= maxsize && sim->similarity > -1) {
+					int minoverlap = (threshold * ((float ) (entry_size + size)))/(1 + threshold);
+					int rem = sim->similarity + entry_size - index_entry.pos; // # of features remaning
+					if (rem < minoverlap || sim->similarity + docsizes[docid] - entry.pos < minoverlap) {
+						sim->similarity = -1000000;
+					} else {
+						atomicAdd(&sim->similarity, 1);
+						if (!sim->doc_j) {
+							sim->doc_i = docid;
+							sim->doc_j = index_entry.doc_id;
+						}
+					}
+				}
+			}
+		}*/
+	}
+}
+
+
+
 __global__ void get_term_count_and_tf_idf(InvertedIndex inverted_index, Entry *query, int *count, int N) {
 	int block_size = N / gridDim.x + (N % gridDim.x == 0 ? 0 : 1);		//Partition size
 	int offset = block_size * (blockIdx.x); 				//Beginning of the block
