@@ -124,7 +124,7 @@ int main(int argc, char **argv) {
 	#pragma omp parallel num_threads(gpuNum)
 	{
 		int cpuid = omp_get_thread_num();
-		cudaSetDevice(cpuid);
+		cudaSetDevice(cpuid+1);
 		double start, end;
 
 		start = gettime();
@@ -139,7 +139,7 @@ int main(int argc, char **argv) {
 	#pragma omp parallel 
 	{
 		int cpuid = omp_get_thread_num();
-		cudaSetDevice(cpuid / NUM_STREAMS);
+		cudaSetDevice(cpuid + 1 / NUM_STREAMS);
 
 		float threshold = atof(argv[2]);
 
@@ -202,83 +202,80 @@ FileStats readInputFile(string &filename, vector<Entry> &entries) {
 	return stats;
 }
 
-void allocVariables(DeviceVariables *dev_vars, float threshold, int num_docs, Similarity** distances){
+void allocVariables(DeviceVariables *dev_vars, float threshold, int num_docs, Similarity** h_result, int queryqtt){
 	dim3 grid, threads;
 
 	get_grid_config(grid, threads);
 
-	gpuAssert(cudaMalloc(&dev_vars->d_dist, num_docs * sizeof(Similarity))); // distance between all the docs and the query doc
-	gpuAssert(cudaMalloc(&dev_vars->d_result, num_docs * sizeof(Similarity))); // compacted similarities between all the docs and the query doc
-	gpuAssert(cudaMalloc(&dev_vars->d_sim, num_docs * sizeof(int))); // count of elements in common
-	gpuAssert(cudaMalloc(&dev_vars->d_size_doc, num_docs * sizeof(int))); // size of all docs
-	gpuAssert(cudaMalloc(&dev_vars->d_query, biggestQuerySize * sizeof(Entry))); // query
-	gpuAssert(cudaMalloc(&dev_vars->d_index, biggestQuerySize * sizeof(int)));
-	gpuAssert(cudaMalloc(&dev_vars->d_count, biggestQuerySize * sizeof(int)));
+	gpuAssert(cudaMalloc(&dev_vars->d_result, queryqtt * num_docs * sizeof(Similarity))); // compacted similarities between all the docs and the query doc
+	gpuAssert(cudaMalloc(&dev_vars->d_intersection, sizeof(int) + queryqtt * num_docs * sizeof(int))); // count of elements in common
+	gpuAssert(cudaMalloc(&dev_vars->d_compacted, queryqtt * num_docs * sizeof(int))); // count of elements in common
+	gpuAssert(cudaMalloc(&dev_vars->d_sizes, num_docs * sizeof(int))); // size of all docs
+	gpuAssert(cudaMalloc(&dev_vars->d_starts, num_docs * sizeof(int))); // size of all docs
 
-	*distances = (Similarity*)malloc(num_docs * sizeof(Similarity));
-
-	int blocksize = 1024;
-	int numBlocks = num_docs / blocksize + (num_docs % blocksize ? 1 : 0);
-
-	gpuAssert(cudaMalloc(&dev_vars->d_bC,sizeof(int)*(numBlocks + 1)));
-	gpuAssert(cudaMalloc(&dev_vars->d_bO,sizeof(int)*numBlocks));
-
+	*h_result = (Similarity*)malloc(queryqtt * num_docs * sizeof(Similarity));
 }
 
-void freeVariables(DeviceVariables *dev_vars, InvertedIndex &index, Similarity** distances){
-	cudaFree(dev_vars->d_dist);
+void freeVariables(DeviceVariables *dev_vars, InvertedIndex &index, Similarity** h_result){
 	cudaFree(dev_vars->d_result);
-	cudaFree(dev_vars->d_sim);
-	cudaFree(dev_vars->d_size_doc);
-	cudaFree(dev_vars->d_query);
-	cudaFree(dev_vars->d_index);
-	cudaFree(dev_vars->d_count);
-	cudaFree(dev_vars->d_bC);
-	cudaFree(dev_vars->d_bO);
+	cudaFree(dev_vars->d_intersection);
+	cudaFree(dev_vars->d_compacted);
+	cudaFree(dev_vars->d_sizes);
+	cudaFree(dev_vars->d_starts);
 
-	free(*distances);
+	free(*h_result);
 
 	if (omp_get_thread_num() % NUM_STREAMS == 0){
 		cudaFree(index.d_count);
 		cudaFree(index.d_index);
 		cudaFree(index.d_inverted_index);
-		cudaFree(index.d_norms);
-		cudaFree(index.d_normsl1);
+		cudaFree(index.d_entries);
 	}
 }
 
 void processTestFile(InvertedIndex &index, FileStats &stats, string &filename, float threshold, stringstream &outputfile) {
 
-	int num_test_local = 0, docid;
+	int num_test_local = 0, querybegin;
 
 	//#pragma omp single nowait
 	printf("Processing input file %s...\n", filename.c_str());
 
 	DeviceVariables dev_vars;
-	Similarity* distances;
+	Similarity* h_result;
 
-	allocVariables(&dev_vars, threshold, index.num_docs, &distances);
+	cudaDeviceProp deviceProp;
+	cudaGetDeviceProperties(&deviceProp, 0);
+	long gpuGlobalMem = deviceProp.totalGlobalMem;
+	long sizeEntries = (stats.start[stats.num_docs - 1] + stats.sizes[stats.num_docs - 1]) * sizeof(Entry);
+	long sizeVectorsSizeAndStart = 2*stats.num_docs*sizeof(int);
+	long sizeOfInvertedIndex = sizeEntries + 2*stats.num_terms*sizeof(int);
+	long freeMem = gpuGlobalMem - sizeEntries - sizeVectorsSizeAndStart - sizeOfInvertedIndex;
 
-	cudaMemcpyAsync(dev_vars.d_size_doc, &stats.sizes[0], index.num_docs * sizeof(int), cudaMemcpyHostToDevice);
+	int queryqtt = freeMem / (stats.num_docs*(2*sizeof(int) + sizeof(Similarity)));
+	queryqtt = queryqtt > stats.num_docs? stats.num_docs: queryqtt;
+
+	allocVariables(&dev_vars, threshold, index.num_docs, &h_result, queryqtt);
+
+	cudaMemcpyAsync(dev_vars.d_sizes, &stats.sizes[0], index.num_docs * sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpyAsync(dev_vars.d_starts, &stats.start[0], index.num_docs * sizeof(int), cudaMemcpyHostToDevice);
 
 	double start = gettime();
 
 #pragma omp for
-	for (docid = 0; docid < index.num_docs - 1; docid++){
+	for (querybegin = 0; querybegin < index.num_docs - 1; querybegin += queryqtt) {
 
 		num_test_local++;
 
-		int totalSimilars = findSimilars(index, threshold, &dev_vars, distances, docid, stats.start[docid], stats.sizes[docid]);
+		int totalSimilars = findSimilars(index, threshold, &dev_vars, h_result, querybegin, queryqtt);
 
 		for (int i = 0; i < totalSimilars; i++) {
 #if OUTPUT
-			outputfile << "(" << docid << ", " << distances[i].doc_id << "): " << distances[i].distance << endl;
+			outputfile << "(" << h_result[i].doc_i << ", " << h_result[i].doc_j << "): " << h_result[i].similarity << endl;
 #endif
 		}
-
 	}
 
-	freeVariables(&dev_vars, index, &distances);
+	freeVariables(&dev_vars, index, &h_result);
 	int threadid = omp_get_thread_num();
 
 	printf("Entries in device %d stream %d: %d\n", threadid / NUM_STREAMS, threadid %  NUM_STREAMS, num_test_local);

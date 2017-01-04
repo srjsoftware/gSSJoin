@@ -43,25 +43,26 @@ struct Entry {
 };
 
 struct Similarity {
-    int doc_id;
-    float distance;
+    int doc_i;
+    int doc_j;
+    float similarity;
 
     Similarity() {}
-    __host__ __device__ Similarity(int doc_id, float distance) : doc_id(doc_id), distance(distance) {}
+    __host__ __device__ Similarity(int doc_i, int doc_j, float distance) : doc_i(doc_i), doc_j(doc_j), similarity(similarity) {}
 
     __host__ __device__ bool operator < (const Similarity &sim) const {
-        return distance > sim.distance;
+        return similarity > sim.similarity;
     }
 
     __host__ __device__ bool operator > (const Similarity &sim) const {
-        return distance < sim.distance;
+        return similarity < sim.similarity;
     }
 };
 
 struct DeviceVariables{
-	int *d_count, *d_index, *d_sim, *d_size_doc, *d_bC, *d_bO;
+	int *d_count, *d_index, *d_intersection, *d_compacted, *d_starts, *d_sizes, *d_bC, *d_bO;
     Entry *d_query;
-    Similarity *d_dist, *d_result;//, *d_nearestK, *h_nearestK;
+    Similarity *d_similarity, *d_result;//, *d_nearestK, *h_nearestK;
     //float *d_qnorms, *d_similars;// [2] =  *d_qnorm, *d_qnorml1;
 };
 

@@ -47,168 +47,82 @@ struct is_bigger_than_threshold
 	__host__ __device__
 	bool operator()(const Similarity &reg)
 	{
-		return (reg.distance > threshold);
+		return (reg.similarity > threshold);
 	}
 };
 
-
-__host__ int findSimilars(InvertedIndex inverted_index, float threshold, struct DeviceVariables *dev_vars, Similarity* distances,
-		int docid, int querystart, int querysize) {
+__host__ int findSimilars(InvertedIndex inverted_index, float threshold, struct DeviceVariables *dev_vars, Similarity* h_result,
+		int querybegin, int queryqtt) {
 
 	dim3 grid, threads;
 	get_grid_config(grid, threads);
 
-	int num_docs = inverted_index.num_docs - docid - 1;
-	int *d_count = dev_vars->d_count, *d_index = dev_vars->d_index, *d_sim = dev_vars->d_sim, *size_doc = dev_vars->d_size_doc;
-	int *d_BlocksCount = dev_vars->d_bC, *d_BlocksOffset = dev_vars->d_bO;
-	Entry *d_query = inverted_index.d_entries + querystart;
-	Similarity *d_similarity = dev_vars->d_dist, *d_result = dev_vars->d_result;
+	int num_docs = inverted_index.num_docs;
+	int *intersection = dev_vars->d_intersection, *sizes = dev_vars->d_sizes, *starts = dev_vars->d_starts;
+	Entry *query = inverted_index.d_entries;
+	int *compacted = dev_vars->d_compacted;
+	Similarity *d_result = dev_vars->d_result;
+	int *totalSimilars = (int *)malloc(sizeof(int));
 
-	gpuAssert(cudaMemset(d_sim + docid + 1, 0, num_docs*sizeof(int)));
+	gpuAssert(cudaMemset(intersection, 0,(1 + queryqtt*num_docs)*sizeof(int)));
 
-	get_term_count_and_tf_idf<<<grid, threads>>>(inverted_index, d_query, d_count, querysize);
+	calculateIntersection<<<grid, threads>>>(inverted_index, query, intersection, querybegin, queryqtt, starts, sizes, threshold);
 
-	thrust::device_ptr<int> thrust_d_count(d_count);
-	thrust::device_ptr<int> thrust_d_index(d_index);
-	thrust::inclusive_scan(thrust_d_count, thrust_d_count + querysize, thrust_d_index);
+	filter_k<<<grid, threads>>>(compacted, intersection, intersection + num_docs*queryqtt, num_docs*queryqtt, threshold, sizes, querybegin, queryqtt, num_docs);
 
-	calculateJaccardSimilarity<<<grid, threads>>>(inverted_index, d_query, d_index, d_sim, querysize, docid);
+	cudaMemcpyAsync(totalSimilars, intersection + num_docs*queryqtt, sizeof(int), cudaMemcpyDeviceToHost);
 
-	filter_registers<<<grid, threads>>>(d_sim, threshold, querysize, docid, inverted_index.num_docs, size_doc, d_similarity);
+	calculateSimilarity<<<grid, threads>>>(d_result, compacted, intersection, sizes, querybegin, num_docs, queryqtt);
 
-	int blocksize = 1024;
-	int numBlocks = cuCompactor::divup(num_docs, blocksize);
+	cudaMemcpyAsync(h_result, d_result, totalSimilars[0]*sizeof(Similarity), cudaMemcpyDeviceToHost);
 
-	int totalSimilars = cuCompactor::compact2<Similarity>(d_similarity + docid + 1, d_result, num_docs, is_bigger_than_threshold(threshold), blocksize, numBlocks, d_BlocksCount, d_BlocksOffset);
-
-	if (totalSimilars) cudaMemcpyAsync(distances, d_result, sizeof(Similarity)*totalSimilars, cudaMemcpyDeviceToHost);
-
-	return totalSimilars;
+	return totalSimilars[0];
 }
 
-__global__ void calculateJaccardSimilarity(InvertedIndex inverted_index, Entry *d_query, int *index, int *dist, int D, int docid) {
-	__shared__ int N;
-
-	if (threadIdx.x == 0) {
-		N = index[D - 1];	//Total number of items to be queried
-	}
-	__syncthreads();
-
-	int block_size = N / gridDim.x + (N % gridDim.x == 0 ? 0 : 1);		//Partition size
-	int lo = block_size * (blockIdx.x); 								//Beginning of the block
-	int hi = min(lo + block_size, N); 								//End of the block
-	int size = hi - lo;											// Real partition size (the last one can be smaller)
-
-	int idx = 0;
-	int end;
-
-	for (int i = threadIdx.x; i < size; i += blockDim.x) {
-		int pos = i + lo;
-
-		while (true) {
-			end = index[idx];
-
-			if (end <= pos) {
-				idx++;
-			}
-			else {
-				break;
-			}
-		}
-
-		Entry entry = d_query[idx]; 		//finds out the term
-		int offset = end - pos;
-
-		int idx2 = inverted_index.d_index[entry.term_id] - offset;
-		Entry index_entry = inverted_index.d_inverted_index[idx2];
-
-		if (index_entry.doc_id > docid) {
-			atomicAdd(&dist[index_entry.doc_id], 1);
-		}
-	}
-}
-
-
-__global__ void calculateIntersection(InvertedIndex inverted_index, Entry *d_query, Similarity *d_candidates, int begin, int query_qtt,
+__global__ void calculateIntersection(InvertedIndex inverted_index, Entry *query, int *intersection, int querybegin, int queryqtt,
 		int *docstart, int *docsizes, float threshold) {
 
 	int block_start, block_end, docid, size, maxsize;
 
-	for (int q = 0; q < query_qtt && q < inverted_index.num_docs - 1; q++) { // percorre as queries
+	for (int q = 0; q < queryqtt && q < inverted_index.num_docs - 1; q++) { // percorre as queries
 
-		docid = begin + q;
+		docid = querybegin + q;
 		size = docsizes[docid];
-		maxsize = ceil(((float) size)/threshold);
+		maxsize = ceil(((float) size)/threshold) + 1;
 
-	/*	for (int idx = blockIdx.x; idx < size; idx += gridDim.x) { // percorre os termos da query (apenas os que estão no midprefix)
-
-			Entry entry = d_query[idx + docstart[docid]]; // find the term
+	for (int idx = blockIdx.x; idx < size; idx += gridDim.x) { // percorre os termos da query (apenas os que estão no midprefix)
+			Entry entry = query[idx + docstart[docid]]; // find the term
 
 			block_start = entry.term_id == 0 ? 0 : inverted_index.d_index[entry.term_id-1];
 			block_end = inverted_index.d_index[entry.term_id];
 
 			for (int i = block_start + threadIdx.x; i < block_end; i += blockDim.x) { // percorre os documentos que tem aquele termo
-
 				Entry index_entry = inverted_index.d_inverted_index[i]; // obter item
-				int entry_size = docsizes[index_entry.doc_id];
-				Similarity *sim = &d_candidates[q*inverted_index.num_docs + index_entry.doc_id];
 
 				// somar na distância
-				if (index_entry.doc_id > docid && entry_size <= maxsize && sim->similarity > -1) {
-					int minoverlap = (threshold * ((float ) (entry_size + size)))/(1 + threshold);
-					int rem = sim->similarity + entry_size - index_entry.pos; // # of features remaning
-					if (rem < minoverlap || sim->similarity + docsizes[docid] - entry.pos < minoverlap) {
-						sim->similarity = -1000000;
-					} else {
-						atomicAdd(&sim->similarity, 1);
-						if (!sim->doc_j) {
-							sim->doc_i = docid;
-							sim->doc_j = index_entry.doc_id;
-						}
-					}
+				if (index_entry.doc_id > docid && docsizes[index_entry.doc_id] < maxsize) {
+					atomicAdd(&intersection[q*inverted_index.num_docs + index_entry.doc_id], 1);
 				}
 			}
-		}*/
+		}
 	}
 }
 
-
-
-__global__ void get_term_count_and_tf_idf(InvertedIndex inverted_index, Entry *query, int *count, int N) {
-	int block_size = N / gridDim.x + (N % gridDim.x == 0 ? 0 : 1);		//Partition size
-	int offset = block_size * (blockIdx.x); 				//Beginning of the block
-	int lim = min(offset + block_size, N); 					//End of the block
-	int size = lim - offset; 						//Block size
-
-	query += offset;
-	count += offset;
-
-	for (int i = threadIdx.x; i < size; i += blockDim.x) {
-		Entry entry = query[i];
-
-		int idf = inverted_index.d_count[entry.term_id];
-		//query[i].tf_idf = entry.tf * log(inverted_index.num_docs / float(max(1, idf)));
-		count[i] = idf;
-		//atomicAdd(d_qnorm, query[i].tf_idf * query[i].tf_idf);
-		//atomicAdd(d_qnorml1, query[i].tf_idf);
-	}
+__global__ void filter_k (int *dst, int *src, int *nres, int n, int threshold, int *sizes, int begin, int queryqtt, int num_docs) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    for (int i = idx; i < n; i += blockDim.x * gridDim.x)
+    {
+        if (src[i] > threshold*((float) sizes[begin + i/num_docs] + sizes[i%num_docs]) / (1.0 + threshold))
+            dst[atomicAdd(nres, 1)] = i;
+    }
 }
 
-__global__ void filter_registers(int *sim, float threshold, int querysize, int docid, int N, int *doc_size, Similarity *similars) { // similars + id_doc
-	N -= (docid + 1);
-	int block_size = N / gridDim.x + (N % gridDim.x == 0 ? 0 : 1);		//Partition size
-	int offset = block_size * (blockIdx.x) + docid + 1; 				//Beginning of the block
-	int lim = min(offset + block_size, N + docid + 1); 					//End of the block
-	int size = lim - offset;
+__global__ void calculateSimilarity(Similarity *result, int *compacted, int *intersection, int *sizes, int begin, int num_docs, int queryqtt) {
+	int i = blockIdx.x * blockDim.x + threadIdx.x;
 
-	similars += offset;
-	sim += offset;
-	doc_size += offset;
-
-	for (int i = threadIdx.x; i < size; i += blockDim.x) {
-		float jac = sim[i]/ (float) (querysize + doc_size[i] - sim[i]);
-
-		similars[i].doc_id = offset + i;
-		similars[i].distance = jac;
+	for (; i < intersection[num_docs*queryqtt]; i += blockDim.x * gridDim.x) {
+		result[i].doc_i = begin + compacted[i]/num_docs;
+		result[i].doc_j = compacted[i]%num_docs;
+		result[i].similarity = ((float) intersection[compacted[i]])/((float) sizes[result[i].doc_i] + sizes[result[i].doc_j] - intersection[compacted[i]]);
 	}
 }
