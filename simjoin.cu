@@ -60,23 +60,23 @@ __host__ int findSimilars(InvertedIndex inverted_index, float threshold, struct 
 	int num_docs = inverted_index.num_docs;
 	int *intersection = dev_vars->d_intersection, *sizes = dev_vars->d_sizes, *starts = dev_vars->d_starts;
 	Entry *query = inverted_index.d_entries;
-	int *compacted = dev_vars->d_compacted;
 	Similarity *d_result = dev_vars->d_result;
-	int *totalSimilars = (int *)malloc(sizeof(int));
+	Similarity *d_similarity = dev_vars->d_similarity;
+	int totalSimilars = 0;
+
+	int *d_BlocksCount = dev_vars->d_bC, *d_BlocksOffset = dev_vars->d_bO;
 
 	gpuAssert(cudaMemset(intersection, 0,(1 + queryqtt*num_docs)*sizeof(int)));
 
 	calculateIntersection<<<grid, threads>>>(inverted_index, query, intersection, querybegin, queryqtt, starts, sizes, threshold);
 
-	filter_k<<<grid, threads>>>(compacted, intersection, intersection + num_docs*queryqtt, num_docs*queryqtt, threshold, sizes, querybegin, queryqtt, num_docs);
+	calculateSimilarity<<<grid, threads>>>(d_similarity, intersection, sizes, querybegin, num_docs, queryqtt);
 
-	cudaMemcpyAsync(totalSimilars, intersection + num_docs*queryqtt, sizeof(int), cudaMemcpyDeviceToHost);
+	int blocksize = 1024;
+	int numBlocks = cuCompactor::divup(num_docs*queryqtt, blocksize);
+	totalSimilars = cuCompactor::compact2<Similarity>(d_result, d_similarity, num_docs*queryqtt, is_bigger_than_threshold(threshold), blocksize, numBlocks, d_BlocksCount, d_BlocksOffset);
 
-	calculateSimilarity<<<grid, threads>>>(d_result, compacted, intersection, sizes, querybegin, num_docs, queryqtt);
-
-	cudaMemcpyAsync(h_result, d_result, totalSimilars[0]*sizeof(Similarity), cudaMemcpyDeviceToHost);
-
-	return totalSimilars[0];
+	return totalSimilars;
 }
 
 __global__ void calculateIntersection(InvertedIndex inverted_index, Entry *query, int *intersection, int querybegin, int queryqtt,
@@ -108,21 +108,12 @@ __global__ void calculateIntersection(InvertedIndex inverted_index, Entry *query
 	}
 }
 
-__global__ void filter_k (int *dst, int *src, int *nres, int n, int threshold, int *sizes, int begin, int queryqtt, int num_docs) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    for (int i = idx; i < n; i += blockDim.x * gridDim.x)
-    {
-        if (src[i] > threshold*((float) sizes[begin + i/num_docs] + sizes[i%num_docs]) / (1.0 + threshold))
-            dst[atomicAdd(nres, 1)] = i;
-    }
-}
-
-__global__ void calculateSimilarity(Similarity *result, int *compacted, int *intersection, int *sizes, int begin, int num_docs, int queryqtt) {
+__global__ void calculateSimilarity(Similarity *similarity, int *intersection, int *sizes, int begin, int num_docs, int queryqtt) {
 	int i = blockIdx.x * blockDim.x + threadIdx.x;
 
-	for (; i < intersection[num_docs*queryqtt]; i += blockDim.x * gridDim.x) {
-		result[i].doc_i = begin + compacted[i]/num_docs;
-		result[i].doc_j = compacted[i]%num_docs;
-		result[i].similarity = ((float) intersection[compacted[i]])/((float) sizes[result[i].doc_i] + sizes[result[i].doc_j] - intersection[compacted[i]]);
+	for (; i < num_docs*queryqtt; i += blockDim.x * gridDim.x) {
+		similarity[i].doc_i = begin + i/num_docs;
+		similarity[i].doc_j = i%num_docs;
+		similarity[i].similarity = ((float) intersection[i])/((float) sizes[similarity[i].doc_i] + sizes[similarity[i].doc_j] - intersection[i]);
 	}
 }

@@ -209,19 +209,27 @@ void allocVariables(DeviceVariables *dev_vars, float threshold, int num_docs, Si
 
 	gpuAssert(cudaMalloc(&dev_vars->d_result, queryqtt * num_docs * sizeof(Similarity))); // compacted similarities between all the docs and the query doc
 	gpuAssert(cudaMalloc(&dev_vars->d_intersection, sizeof(int) + queryqtt * num_docs * sizeof(int))); // count of elements in common
-	gpuAssert(cudaMalloc(&dev_vars->d_compacted, queryqtt * num_docs * sizeof(int))); // count of elements in common
+	gpuAssert(cudaMalloc(&dev_vars->d_similarity, queryqtt * num_docs * sizeof(Similarity))); // similarity between all the docs and the query doc
 	gpuAssert(cudaMalloc(&dev_vars->d_sizes, num_docs * sizeof(int))); // size of all docs
 	gpuAssert(cudaMalloc(&dev_vars->d_starts, num_docs * sizeof(int))); // size of all docs
 
 	*h_result = (Similarity*)malloc(queryqtt * num_docs * sizeof(Similarity));
+
+	int blocksize = 1024;
+	int numBlocks = (num_docs*queryqtt) / blocksize + ((num_docs*queryqtt) % blocksize ? 1 : 0);
+
+	gpuAssert(cudaMalloc(&dev_vars->d_bC,sizeof(int)*(numBlocks + 1)));
+	gpuAssert(cudaMalloc(&dev_vars->d_bO,sizeof(int)*numBlocks));
 }
 
 void freeVariables(DeviceVariables *dev_vars, InvertedIndex &index, Similarity** h_result){
 	cudaFree(dev_vars->d_result);
 	cudaFree(dev_vars->d_intersection);
-	cudaFree(dev_vars->d_compacted);
+	cudaFree(dev_vars->d_similarity);
 	cudaFree(dev_vars->d_sizes);
 	cudaFree(dev_vars->d_starts);
+	cudaFree(dev_vars->d_bC);
+	cudaFree(dev_vars->d_bO);
 
 	free(*h_result);
 
@@ -251,7 +259,7 @@ void processTestFile(InvertedIndex &index, FileStats &stats, string &filename, f
 	long sizeOfInvertedIndex = sizeEntries + 2*stats.num_terms*sizeof(int);
 	long freeMem = gpuGlobalMem - sizeEntries - sizeVectorsSizeAndStart - sizeOfInvertedIndex;
 
-	int queryqtt = freeMem / (stats.num_docs*(2*sizeof(int) + sizeof(Similarity)));
+	int queryqtt = freeMem / (stats.num_docs*(2*sizeof(int) + 2*sizeof(Similarity)));
 	queryqtt = queryqtt > stats.num_docs? stats.num_docs: queryqtt;
 
 	allocVariables(&dev_vars, threshold, index.num_docs, &h_result, queryqtt);

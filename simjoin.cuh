@@ -44,6 +44,6 @@ __global__ void calculateIntersection(InvertedIndex inverted_index, Entry *query
 
 __global__ void filter_k (int *dst, int *src, int *nres, int n, int threshold, int *sizes, int begin, int queryqtt, int num_docs);
 
-__global__ void calculateSimilarity(Similarity *h_result, int *compacted, int *intersection, int *sizes, int begin, int num_docs, int queryqtt);
+__global__ void calculateSimilarity(Similarity *h_result, int *intersection, int *sizes, int begin, int num_docs, int queryqtt);
 
 #endif /* KNN_CUH_ */
