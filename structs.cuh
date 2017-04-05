@@ -59,8 +59,8 @@ struct Similarity {
 };
 
 struct DeviceVariables{
-	int *d_count, *d_index, *d_sim, *d_size_doc, *d_bC, *d_bO;
-    Entry *d_query;
+	int *d_count, *d_index, *d_sim, *d_size_doc, *d_bC, *d_bO, *di_index, *di_count;
+    Entry *d_query, *d_inverted_index, *d_entries;
     Similarity *d_dist, *d_result;//, *d_nearestK, *h_nearestK;
     //float *d_qnorms, *d_similars;// [2] =  *d_qnorm, *d_qnorml1;
 };

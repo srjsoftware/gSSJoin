@@ -23,45 +23,31 @@
 
 #include "inverted_index.cuh"
 #include "utils.cuh"
+#include "structs.cuh"
 
-__host__ InvertedIndex make_inverted_index(int num_docs, int num_terms, vector<Entry> &entries) {
+
+__host__ InvertedIndex make_inverted_index(int num_docs, int num_terms, int size_entries, int entries_offset, vector<Entry> &entries, struct DeviceVariables *dev_vars) {
 	#pragma omp single nowait
 	printf("Creating inverted index... \n");
-	Entry *d_entries, *d_inverted_index;
-	int *d_count, *d_index;
-	float *d_norms, *d_normsl1;
-
-	#pragma omp single nowait
-	printf("Allocating memory...\n");
-
-	gpuAssert(cudaMalloc(&d_inverted_index, entries.size() * sizeof(Entry)));
-	gpuAssert(cudaMalloc(&d_entries, entries.size() * sizeof(Entry)));
-	gpuAssert(cudaMalloc(&d_index, num_terms * sizeof(int)));
-	gpuAssert(cudaMalloc(&d_count, num_terms * sizeof(int)));
-	gpuAssert(cudaMalloc(&d_norms, num_docs * sizeof(float)));
-	gpuAssert(cudaMalloc(&d_normsl1, num_docs * sizeof(float)));
+	Entry *d_entries = dev_vars->d_entries, *d_inverted_index = dev_vars->d_inverted_index;
+	int *d_count = dev_vars->di_count, *d_index = dev_vars->di_index;
 
 	gpuAssert(cudaMemset(d_count, 0, num_terms * sizeof(int)));
-	gpuAssert(cudaMemset(d_norms, 0, num_docs * sizeof(float)));
-	gpuAssert(cudaMemset(d_normsl1, 0, num_docs * sizeof(float)));
-	gpuAssert(cudaMemcpy(d_entries, &entries[0], entries.size() * sizeof(Entry), cudaMemcpyHostToDevice));
-
-	#pragma omp single nowait
-	printf("Finished allocating\n");
+	gpuAssert(cudaMemcpy(d_entries, &entries[entries_offset], size_entries * sizeof(Entry), cudaMemcpyHostToDevice));
 
 	dim3 grid, threads;
 	get_grid_config(grid, threads);
 
 	double start = gettime();
 
-	count_occurrences << <grid, threads >> >(d_entries, d_count, entries.size());
+	count_occurrences << <grid, threads >> >(d_entries, d_count, size_entries);
 
 	thrust::device_ptr<int> thrust_d_count(d_count);
 	thrust::device_ptr<int> thrust_d_index(d_index);
 	thrust::exclusive_scan(thrust_d_count, thrust_d_count + num_terms, thrust_d_index);
 
 	mount_inverted_index_and_compute_tf_idf << <grid, threads >> >(d_entries, d_inverted_index, d_count,
-		d_index, d_norms, d_normsl1, entries.size(), num_docs);
+		d_index, size_entries, num_docs);
 
 	gpuAssert(cudaDeviceSynchronize());
 
@@ -69,7 +55,7 @@ __host__ InvertedIndex make_inverted_index(int num_docs, int num_terms, vector<E
 
 	#pragma omp single nowait
 	printf("Time for insertion: %lf\n", end - start);
-	return InvertedIndex(d_inverted_index, d_index, d_count, d_norms, d_normsl1, d_entries, num_docs, entries.size(), num_terms);
+	return InvertedIndex(d_inverted_index, d_index, d_count, d_entries, num_docs, size_entries, num_terms);
 }
 
 __global__ void count_occurrences(Entry *entries, int *count, int n) {
@@ -87,7 +73,7 @@ __global__ void count_occurrences(Entry *entries, int *count, int n) {
 	}
 }
 
-__global__ void mount_inverted_index_and_compute_tf_idf(Entry *entries, Entry *inverted_index, int *count, int *index, float *d_norms, float *d_normsl1, int n, int num_docs) {
+__global__ void mount_inverted_index_and_compute_tf_idf(Entry *entries, Entry *inverted_index, int *count, int *index, int n, int num_docs) {
 	int block_size = n / gridDim.x + (n % gridDim.x == 0 ? 0 : 1);		//Number of items used by each block
 	int offset = block_size * (blockIdx.x); 				//Beginning of the block
 	int lim = offset + block_size; 						//End of the block
@@ -100,11 +86,8 @@ __global__ void mount_inverted_index_and_compute_tf_idf(Entry *entries, Entry *i
 		Entry entry = entries[i];
 		int pos = atomicAdd(index + entry.term_id, 1);
 
-		entry.tf_idf = entry.tf * log(float(num_docs) / float(count[entry.term_id]));
+		//entry.tf_idf = entry.tf * log(float(num_docs) / float(count[entry.term_id]));
 		inverted_index[pos] = entry;
-
-		atomicAdd(&d_norms[entry.doc_id], pow(entry.tf_idf, 2.0f));
-		atomicAdd(&d_normsl1[entry.doc_id], entry.tf_idf);
 
 	}
 }

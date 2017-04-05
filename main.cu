@@ -37,6 +37,7 @@
 #include "utils.cuh"
 #include "inverted_index.cuh"
 #include "simjoin.cuh"
+#include "tests.cu"
 
 
 #define OUTPUT 1
@@ -58,7 +59,7 @@ struct FileStats {
 
 FileStats readInputFile(string &file, vector<Entry> &entries);
 void processTestFile(InvertedIndex &index, FileStats &stats, string &file, float threshold, stringstream &fileout);
-
+void allocIndexVariables(DeviceVariables *dev_vars, int num_terms, int block_size);
 
 /**
  * Receives as parameters the training file name and the test file name
@@ -74,11 +75,51 @@ int main(int argc, char **argv) {
 		cerr << "Wrong parameters. Correct usage: <executable> <input_file> <threshold> <output_file> <number_of_gpus>" << endl;
 		exit(1);
 	}
+	DeviceVariables dev_vars;
+	vector<Entry> entries;
+	InvertedIndex index;
+
+	string inputFileName(argv[1]);
+	FileStats stats = readInputFile(inputFileName, entries);
+
+	int block_size = 100;
+	int block_num = ceil((float) stats.num_docs / block_size);
+
+	allocIndexVariables(&dev_vars, stats.num_terms, entries.size());
+
+	for (int i = 0; i < block_num; i++) {
+
+		int set_offset = i*block_size;
+		int entries_offset = stats.start[i*block_size];
+		int last_set = (i+1)*block_size >= stats.num_docs? stats.num_docs - 1: (i+1)*block_size - 1;
+		int entries_size = stats.start[last_set] + stats.sizes[last_set] - entries_offset;
+		printf("=========Block %d=========\nset_offset = %d\nentrie_offset: %d\nlast_set: %d\nentries_size: %d\n", i, set_offset, entries_offset, last_set, entries_size);
+
+		index = make_inverted_index(stats.num_docs, stats.num_terms, entries_size, entries_offset, entries, &dev_vars);
+
+		for (int j = 0; j <= i; j++) {
+
+		}
+
+	}
+
+	return 0;
+}
+
+/*
+ *
+ *
+int main(int argc, char **argv) {
+
+	if (argc != 5) {
+		cerr << "Wrong parameters. Correct usage: <executable> <input_file> <threshold> <output_file> <number_of_gpus>" << endl;
+		exit(1);
+	}
 
 	int gpuNum;
 	cudaGetDeviceCount(&gpuNum);
 
-	if (gpuNum > atoi(argv[4])){
+	if (gpuNum >= atoi(argv[4])){
 		gpuNum = atoi(argv[4]);
 		if (gpuNum < 1)
 			gpuNum = 1;
@@ -97,7 +138,6 @@ int main(int argc, char **argv) {
 
 	ofstream ofsfileoutput(argv[3], ofstream::out | ofstream::app);
 #endif
-	vector<string> inputs;// to read the whole test file in memory
 	vector<InvertedIndex> indexes;
 	indexes.resize(gpuNum);
 
@@ -119,8 +159,6 @@ int main(int argc, char **argv) {
 	for (int i = 0; i < numThreads; i++){
 		outputString.push_back(new stringstream);
 	}
-
-	//create an inverted index for all streams in each GPU
 	#pragma omp parallel num_threads(gpuNum)
 	{
 		int cpuid = omp_get_thread_num();
@@ -128,7 +166,7 @@ int main(int argc, char **argv) {
 		double start, end;
 
 		start = gettime();
-		indexes[cpuid] = make_inverted_index(stats.num_docs, stats.num_terms, entries);
+		indexes[cpuid] = make_inverted_index(stats.num_docs, stats.num_terms, entries.size(), entries);
 		end = gettime();
 
 		#pragma omp single nowait
@@ -162,8 +200,7 @@ int main(int argc, char **argv) {
 
 		ofsfileoutput.close();
 #endif
-		return 0;
-}
+*/
 
 FileStats readInputFile(string &filename, vector<Entry> &entries) {
 	ifstream input(filename.c_str());
@@ -202,7 +239,14 @@ FileStats readInputFile(string &filename, vector<Entry> &entries) {
 	return stats;
 }
 
-void allocVariables(DeviceVariables *dev_vars, float threshold, int num_docs, Similarity** distances){
+void allocIndexVariables(DeviceVariables *dev_vars, int num_terms, int block_size) {
+	gpuAssert(cudaMalloc(&dev_vars->d_inverted_index, block_size * sizeof(Entry)));
+	gpuAssert(cudaMalloc(&dev_vars->d_entries, block_size * sizeof(Entry)));
+	gpuAssert(cudaMalloc(&dev_vars->di_index, num_terms * sizeof(int)));
+	gpuAssert(cudaMalloc(&dev_vars->di_count, num_terms * sizeof(int)));
+}
+
+void allocVariables(DeviceVariables *dev_vars, float threshold, int num_docs, Similarity** distances) {
 	dim3 grid, threads;
 
 	get_grid_config(grid, threads);
@@ -242,54 +286,6 @@ void freeVariables(DeviceVariables *dev_vars, InvertedIndex &index, Similarity**
 		cudaFree(index.d_count);
 		cudaFree(index.d_index);
 		cudaFree(index.d_inverted_index);
-		cudaFree(index.d_norms);
-		cudaFree(index.d_normsl1);
+		cudaFree(index.d_entries);
 	}
-}
-
-void processTestFile(InvertedIndex &index, FileStats &stats, string &filename, float threshold, stringstream &outputfile) {
-
-	int num_test_local = 0, docid;
-
-	//#pragma omp single nowait
-	printf("Processing input file %s...\n", filename.c_str());
-
-	DeviceVariables dev_vars;
-	Similarity* distances;
-
-	allocVariables(&dev_vars, threshold, index.num_docs, &distances);
-
-	cudaMemcpyAsync(dev_vars.d_size_doc, &stats.sizes[0], index.num_docs * sizeof(int), cudaMemcpyHostToDevice);
-
-	double start = gettime();
-
-#pragma omp for
-	for (docid = 0; docid < index.num_docs - 1; docid++){
-
-		num_test_local++;
-
-		int totalSimilars = findSimilars(index, threshold, &dev_vars, distances, docid, stats.start[docid], stats.sizes[docid]);
-
-		for (int i = 0; i < totalSimilars; i++) {
-#if OUTPUT
-			outputfile << "(" << docid << ", " << distances[i].doc_id << "): " << distances[i].distance << endl;
-#endif
-		}
-
-	}
-
-	freeVariables(&dev_vars, index, &distances);
-	int threadid = omp_get_thread_num();
-
-	printf("Entries in device %d stream %d: %d\n", threadid / NUM_STREAMS, threadid %  NUM_STREAMS, num_test_local);
-
-	#pragma omp barrier
-
-	double end = gettime();
-
-	#pragma omp master
-	{
-		printf("Time taken for %d queries: %lf seconds\n\n", num_tests, end - start);
-	}
-
 }
