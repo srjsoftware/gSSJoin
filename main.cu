@@ -43,32 +43,15 @@
 #define OUTPUT 1
 #define NUM_STREAMS 1
 
-
 using namespace std;
 
-struct FileStats {
-	int num_docs;
-	int num_terms;
-
-	vector<int> sizes; // set sizes
-	map<int, int> doc_to_class;
-	vector<int> start; // beginning of each entrie
-
-	FileStats() : num_docs(0), num_terms(0) {}
-};
 
 FileStats readInputFile(string &file, vector<Entry> &entries);
-void processTestFile(InvertedIndex &index, FileStats &stats, string &file, float threshold, stringstream &fileout);
-void allocIndexVariables(DeviceVariables *dev_vars, int num_terms, int block_size);
+void allocVariables(DeviceVariables *dev_vars, Pair **similar_pairs, int num_terms, int block_size, int entries_size, int num_sets);
 
 /**
  * Receives as parameters the training file name and the test file name
  */
-
-static int num_tests = 0;
-int biggestQuerySize = -1;
-
-
 int main(int argc, char **argv) {
 
 	if (argc != 5) {
@@ -78,27 +61,51 @@ int main(int argc, char **argv) {
 	DeviceVariables dev_vars;
 	vector<Entry> entries;
 	InvertedIndex index;
+	Pair *similar_pairs;
 
 	string inputFileName(argv[1]);
 	FileStats stats = readInputFile(inputFileName, entries);
+	float threshold = atof(argv[2]);
 
-	int block_size = 100;
-	int block_num = ceil((float) stats.num_docs / block_size);
+	int block_size = 5;
+	int block_num = ceil((float) stats.num_sets / block_size);
 
-	allocIndexVariables(&dev_vars, stats.num_terms, entries.size());
+	allocVariables(&dev_vars, &similar_pairs, stats.num_terms, block_size, entries.size(), stats.num_sets);
+	gpuAssert(cudaMemcpy(dev_vars.d_starts, &stats.start[0], stats.num_sets * sizeof(int), cudaMemcpyHostToDevice));
+	gpuAssert(cudaMemcpy(dev_vars.d_sizes, &stats.sizes[0], stats.num_sets * sizeof(int), cudaMemcpyHostToDevice));
 
 	for (int i = 0; i < block_num; i++) {
-
-		int set_offset = i*block_size;
-		int entries_offset = stats.start[i*block_size];
-		int last_set = (i+1)*block_size >= stats.num_docs? stats.num_docs - 1: (i+1)*block_size - 1;
+		int entries_block_start = i*block_size;
+		int entries_offset = stats.start[entries_block_start];
+		int last_set = entries_block_start + block_size >= stats.num_sets? stats.num_sets - 1: entries_block_start + block_size - 1;
+		int entries_block_size = last_set - entries_block_start + 1;
 		int entries_size = stats.start[last_set] + stats.sizes[last_set] - entries_offset;
-		printf("=========Block %d=========\nset_offset = %d\nentrie_offset: %d\nlast_set: %d\nentries_size: %d\n", i, set_offset, entries_offset, last_set, entries_size);
+		//printf("=========Indexed Block %d=========\nset_offset = %d\nentrie_offset: %d\nlast_set: %d\nentries_size: %d\n", i, entries_block_start, entries_offset, last_set, entries_size);
 
-		index = make_inverted_index(stats.num_docs, stats.num_terms, entries_size, entries_offset, entries, &dev_vars);
+		// build the inverted index for block i of size block_size
+		index = make_inverted_index(stats.num_sets, stats.num_terms, entries_size, entries_offset, entries, &dev_vars);
+		//print_sets(entries, stats.sizes, stats.start); //print_invertedIndex(index);
 
-		for (int j = 0; j <= i; j++) {
+		for (int j = 0; j <= i; j++) { // calculate similarity between indexed sets and probe sets
+			int probe_block_start = j*block_size;
+			int last_probe = probe_block_start + block_size > stats.num_sets? stats.num_sets - 1: probe_block_start + block_size - 1;
+			int probe_block_size = last_probe - probe_block_start + 1;
+			int probes_offset = stats.start[probe_block_start];
 
+			if (j < i) {
+				int probes_size = stats.start[last_probe] + stats.sizes[last_probe] - probes_offset;
+				gpuAssert(cudaMemcpy(dev_vars.d_probes, &entries[probes_offset], probes_size * sizeof(Entry), cudaMemcpyHostToDevice));
+			}
+			printf("=========Probe Block %d=========\nprobe_block_start = %d\nprobe_offset: %d\nlast_probe: %d\nprobe_block_size: %d\n===============================\n", j, probe_block_start, probes_offset,last_probe, probe_block_size);
+
+
+			int totalSimilars = findSimilars(index, threshold, &dev_vars, similar_pairs, probe_block_start,
+					probe_block_size, probes_offset, entries_block_size, entries_block_start, i, j);
+
+			printf("\ntotalSimilars: %d", totalSimilars);
+			//print_intersection(dev_vars.d_intersection, block_size, i, j);
+			print_result(similar_pairs, totalSimilars);
+			// TODO escrever em disco
 		}
 
 	}
@@ -106,6 +113,61 @@ int main(int argc, char **argv) {
 	return 0;
 }
 
+FileStats readInputFile(string &filename, vector<Entry> &entries) {
+	ifstream input(filename.c_str());
+	string line;
+
+	FileStats stats;
+	int accumulatedsize = 0;
+	int doc_id = 0;
+
+	while (!input.eof()) {
+		getline(input, line);
+		if (line == "") continue;
+
+		vector<string> tokens = split(line, ' ');
+		//biggestQuerySize = max((int)tokens.size() / 2, biggestQuerySize);
+
+		int size = (tokens.size() - 2)/2;
+		stats.sizes.push_back(size);
+		stats.start.push_back(accumulatedsize);
+		accumulatedsize += size;
+
+		for (int i = 2, size = tokens.size(); i + 1 < size; i += 2) {
+			int term_id = atoi(tokens[i].c_str());
+			int term_count = atoi(tokens[i + 1].c_str());
+			stats.num_terms = max(stats.num_terms, term_id + 1);
+			entries.push_back(Entry(doc_id, term_id, term_count));
+		}
+		doc_id++;
+	}
+
+	stats.num_sets = stats.start.size();
+
+	input.close();
+
+	return stats;
+}
+
+void allocVariables(DeviceVariables *dev_vars, Pair **similar_pairs, int num_terms, int block_size, int entries_size, int num_sets) {
+	// TODO alocar o tamanho certo para entries, probes e o índice invertido
+
+	gpuAssert(cudaMalloc(&dev_vars->d_inverted_index, entries_size * sizeof(Entry)));
+	gpuAssert(cudaMalloc(&dev_vars->d_entries, entries_size * sizeof(Entry)));
+	gpuAssert(cudaMalloc(&dev_vars->d_probes, entries_size * sizeof(Entry)));
+	gpuAssert(cudaMalloc(&dev_vars->d_index, num_terms * sizeof(int)));
+	gpuAssert(cudaMalloc(&dev_vars->d_count, num_terms * sizeof(int)));
+	gpuAssert(cudaMalloc(&dev_vars->d_intersection, (1 + block_size * block_size) * sizeof(int)));
+	gpuAssert(cudaMalloc(&dev_vars->d_pairs, block_size *block_size * sizeof(Pair)));
+	gpuAssert(cudaMalloc(&dev_vars->d_sizes, num_sets * sizeof(int)));
+	gpuAssert(cudaMalloc(&dev_vars->d_starts, num_sets * sizeof(int)));
+
+	*similar_pairs = (Pair *)malloc(sizeof(Pair)*block_size*block_size);
+}
+
+void write_output() {
+
+}
 /*
  *
  *
@@ -202,51 +264,7 @@ int main(int argc, char **argv) {
 #endif
 */
 
-FileStats readInputFile(string &filename, vector<Entry> &entries) {
-	ifstream input(filename.c_str());
-	string line;
-
-	FileStats stats;
-	int accumulatedsize = 0;
-	int doc_id = 0;
-
-	while (!input.eof()) {
-		getline(input, line);
-		if (line == "") continue;
-
-		num_tests++;
-		vector<string> tokens = split(line, ' ');
-		biggestQuerySize = max((int)tokens.size() / 2, biggestQuerySize);
-
-		int size = (tokens.size() - 2)/2;
-		stats.sizes.push_back(size);
-		stats.start.push_back(accumulatedsize);
-		accumulatedsize += size;
-
-		for (int i = 2, size = tokens.size(); i + 1 < size; i += 2) {
-			int term_id = atoi(tokens[i].c_str());
-			int term_count = atoi(tokens[i + 1].c_str());
-			stats.num_terms = max(stats.num_terms, term_id + 1);
-			entries.push_back(Entry(doc_id, term_id, term_count));
-		}
-		doc_id++;
-	}
-
-	stats.num_docs = num_tests;
-
-	input.close();
-
-	return stats;
-}
-
-void allocIndexVariables(DeviceVariables *dev_vars, int num_terms, int block_size) {
-	gpuAssert(cudaMalloc(&dev_vars->d_inverted_index, block_size * sizeof(Entry)));
-	gpuAssert(cudaMalloc(&dev_vars->d_entries, block_size * sizeof(Entry)));
-	gpuAssert(cudaMalloc(&dev_vars->di_index, num_terms * sizeof(int)));
-	gpuAssert(cudaMalloc(&dev_vars->di_count, num_terms * sizeof(int)));
-}
-
-void allocVariables(DeviceVariables *dev_vars, float threshold, int num_docs, Similarity** distances) {
+/*void allocVariables(DeviceVariables *dev_vars, float threshold, int num_docs, Similarity** distances) {
 	dim3 grid, threads;
 
 	get_grid_config(grid, threads);
@@ -288,4 +306,4 @@ void freeVariables(DeviceVariables *dev_vars, InvertedIndex &index, Similarity**
 		cudaFree(index.d_inverted_index);
 		cudaFree(index.d_entries);
 	}
-}
+}*/

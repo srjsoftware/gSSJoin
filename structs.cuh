@@ -28,6 +28,8 @@
 #ifndef STRUCTS_CUH_
 #define STRUCTS_CUH_
 
+using namespace std;
+
 struct Entry {
     int doc_id;
     int term_id;
@@ -58,11 +60,29 @@ struct Similarity {
     }
 };
 
+struct Pair {
+	int set_x;
+	int set_y;
+	float similarity;
+};
+
 struct DeviceVariables{
-	int *d_count, *d_index, *d_sim, *d_size_doc, *d_bC, *d_bO, *di_index, *di_count;
-    Entry *d_query, *d_inverted_index, *d_entries;
-    Similarity *d_dist, *d_result;//, *d_nearestK, *h_nearestK;
+	int *d_sizes, *d_starts, *d_intersection, *d_index, *d_count;
+    Entry *d_inverted_index, *d_entries, *d_probes;
+    Pair *h_pairs, *d_pairs;
+    //Similarity *d_dist, *d_result;//, *d_nearestK, *h_nearestK;
     //float *d_qnorms, *d_similars;// [2] =  *d_qnorm, *d_qnorml1;
+};
+
+struct FileStats {
+	int num_sets;
+	int num_terms;
+
+	vector<int> sizes; // set sizes
+	//map<int, int> doc_to_class;
+	vector<int> start; // beginning of each sets
+
+	FileStats() : num_sets(0), num_terms(0) {}
 };
 
 #endif /* STRUCTS_CUH_ */

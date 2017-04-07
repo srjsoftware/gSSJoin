@@ -36,10 +36,16 @@ __global__ void bitonicPartialSort(Similarity *dist, Similarity *nearestK, int N
 
 __global__ void get_term_count_and_tf_idf(InvertedIndex inverted_index, Entry *query, int *count, int N);
 
-__host__ int findSimilars(InvertedIndex inverted_index, float threshold, struct DeviceVariables *dev_vars, Similarity* distances,
-		int docid, int querystart, int querysize);
+__host__ int findSimilars(InvertedIndex index, float threshold, struct DeviceVariables *dev_vars, Pair *result,
+		int block_start, int block_size, int probes_offset, int indexed_block_size, int indexed_offset,
+		int indexed_block, int probe_block);
 
-__global__ void calculateJaccardSimilarity(InvertedIndex inverted_index, Entry *d_query, int *index, int *dist, int D, int docid);
+__global__ void calculateIntersection(InvertedIndex index, int *intersection, Entry *probes, int *set_starts,
+		int *set_sizes, int block_start, int block_size, int probes_offset, int indexed_offset, float threshold);
+
+__global__ void calculateJaccardSimilarity(int *intersection, Pair *pairs, int *totalSimilars, int *sizes,
+		int intersection_size, int probes_offset, int indexed_offset, int block_size, int indexed_block_size,
+		float threshold);
 
 __device__ void bitonicPartialSort(Similarity *dist, int N, int K);
 

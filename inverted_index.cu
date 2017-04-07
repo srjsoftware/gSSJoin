@@ -30,7 +30,7 @@ __host__ InvertedIndex make_inverted_index(int num_docs, int num_terms, int size
 	#pragma omp single nowait
 	printf("Creating inverted index... \n");
 	Entry *d_entries = dev_vars->d_entries, *d_inverted_index = dev_vars->d_inverted_index;
-	int *d_count = dev_vars->di_count, *d_index = dev_vars->di_index;
+	int *d_count = dev_vars->d_count, *d_index = dev_vars->d_index;
 
 	gpuAssert(cudaMemset(d_count, 0, num_terms * sizeof(int)));
 	gpuAssert(cudaMemcpy(d_entries, &entries[entries_offset], size_entries * sizeof(Entry), cudaMemcpyHostToDevice));
