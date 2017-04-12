@@ -48,6 +48,7 @@ using namespace std;
 
 FileStats readInputFile(string &file, vector<Entry> &entries);
 void allocVariables(DeviceVariables *dev_vars, Pair **similar_pairs, int num_terms, int block_size, int entries_size, int num_sets);
+void freeVariables(DeviceVariables *dev_vars, Pair **similar_pairs);
 void write_output(Pair *similar_pairs, int totalSimilars, stringstream &outputfile);
 
 /**
@@ -74,7 +75,15 @@ int main(int argc, char **argv) {
 	stringstream outputstring;
 	ofstream ofsfileoutput(argv[3], ofstream::out | ofstream::app);
 
-	int block_size = 5;
+	// calculating maximum size of data structures
+	size_t free_mem, total_mem;
+	cudaMemGetInfo(&free_mem, &total_mem);
+	long sizeEntries = (stats.start[stats.num_sets - 1] + stats.sizes[stats.num_sets - 1]) * sizeof(Entry);
+	long sizeVectorsN = stats.num_sets*sizeof(int);
+	long freeMem = free_mem - 3*sizeEntries - sizeVectorsN*4;
+
+	int block_size = freeMem / (stats.num_sets*(sizeof(float) + sizeof(Pair)));
+	block_size = block_size > stats.num_sets? stats.num_sets: block_size;
 	int block_num = ceil((float) stats.num_sets / block_size);
 
 	double start = gettime();
@@ -185,6 +194,21 @@ void allocVariables(DeviceVariables *dev_vars, Pair **similar_pairs, int num_ter
 	gpuAssert(cudaMalloc(&dev_vars->d_starts, num_sets * sizeof(int)));
 
 	*similar_pairs = (Pair *)malloc(sizeof(Pair)*block_size*block_size);
+}
+
+void freeVariables(DeviceVariables *dev_vars, Pair **similar_pairs) {
+	cudaFree(&dev_vars->d_inverted_index);
+	cudaFree(&dev_vars->d_entries);
+	cudaFree(&dev_vars->d_index);
+	cudaFree(&dev_vars->d_count);
+
+	cudaFree(&dev_vars->d_probes);
+	cudaFree(&dev_vars->d_intersection);
+	cudaFree(&dev_vars->d_pairs);
+	cudaFree(&dev_vars->d_sizes);
+	cudaFree(&dev_vars->d_starts);
+
+	free(*similar_pairs);
 }
 
 void write_output(Pair *similar_pairs, int totalSimilars, stringstream &outputfile) {
