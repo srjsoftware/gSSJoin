@@ -48,6 +48,7 @@ using namespace std;
 
 FileStats readInputFile(string &file, vector<Entry> &entries);
 void allocVariables(DeviceVariables *dev_vars, Pair **similar_pairs, int num_terms, int block_size, int entries_size, int num_sets);
+void write_output(Pair *similar_pairs, int totalSimilars, stringstream &outputfile);
 
 /**
  * Receives as parameters the training file name and the test file name
@@ -66,6 +67,11 @@ int main(int argc, char **argv) {
 	string inputFileName(argv[1]);
 	FileStats stats = readInputFile(inputFileName, entries);
 	float threshold = atof(argv[2]);
+
+	ofstream ofsf(argv[3], ofstream::trunc);
+	ofsf.close();
+	stringstream outputstring;
+	ofstream ofsfileoutput(argv[3], ofstream::out | ofstream::app);
 
 	int block_size = 5;
 	int block_num = ceil((float) stats.num_sets / block_size);
@@ -106,9 +112,13 @@ int main(int argc, char **argv) {
 			//print_intersection(dev_vars.d_intersection, block_size, i, j);
 			print_result(similar_pairs, totalSimilars);
 			// TODO escrever em disco
+			write_output(similar_pairs, totalSimilars, outputstring);
 		}
 
 	}
+
+	ofsfileoutput << outputstring.str();
+	ofsfileoutput.close();
 
 	return 0;
 }
@@ -152,11 +162,14 @@ FileStats readInputFile(string &filename, vector<Entry> &entries) {
 void allocVariables(DeviceVariables *dev_vars, Pair **similar_pairs, int num_terms, int block_size, int entries_size, int num_sets) {
 	// TODO alocar o tamanho certo para entries, probes e o índice invertido
 
+	// Inverted index's variables
 	gpuAssert(cudaMalloc(&dev_vars->d_inverted_index, entries_size * sizeof(Entry)));
 	gpuAssert(cudaMalloc(&dev_vars->d_entries, entries_size * sizeof(Entry)));
-	gpuAssert(cudaMalloc(&dev_vars->d_probes, entries_size * sizeof(Entry)));
 	gpuAssert(cudaMalloc(&dev_vars->d_index, num_terms * sizeof(int)));
 	gpuAssert(cudaMalloc(&dev_vars->d_count, num_terms * sizeof(int)));
+
+	// Variables used to perform the similarity join
+	gpuAssert(cudaMalloc(&dev_vars->d_probes, entries_size * sizeof(Entry)));
 	gpuAssert(cudaMalloc(&dev_vars->d_intersection, (1 + block_size * block_size) * sizeof(int)));
 	gpuAssert(cudaMalloc(&dev_vars->d_pairs, block_size *block_size * sizeof(Pair)));
 	gpuAssert(cudaMalloc(&dev_vars->d_sizes, num_sets * sizeof(int)));
@@ -165,145 +178,8 @@ void allocVariables(DeviceVariables *dev_vars, Pair **similar_pairs, int num_ter
 	*similar_pairs = (Pair *)malloc(sizeof(Pair)*block_size*block_size);
 }
 
-void write_output() {
-
+void write_output(Pair *similar_pairs, int totalSimilars, stringstream &outputfile) {
+	for (int i = 0; i < totalSimilars; i++) {
+		outputfile << "(" << similar_pairs[i].set_x << ", " << similar_pairs[i].set_y << "): " << similar_pairs[i].similarity << endl;
+	}
 }
-/*
- *
- *
-int main(int argc, char **argv) {
-
-	if (argc != 5) {
-		cerr << "Wrong parameters. Correct usage: <executable> <input_file> <threshold> <output_file> <number_of_gpus>" << endl;
-		exit(1);
-	}
-
-	int gpuNum;
-	cudaGetDeviceCount(&gpuNum);
-
-	if (gpuNum >= atoi(argv[4])){
-		gpuNum = atoi(argv[4]);
-		if (gpuNum < 1)
-			gpuNum = 1;
-	}
-	//cerr << "Using " << gpuNum << "GPUs" << endl;
-
-	// we use 2 streams per GPU
-	int numThreads = gpuNum*NUM_STREAMS;
-
-	omp_set_num_threads(numThreads);
-
-#if OUTPUT
-	//truncate output files
-	ofstream ofsf(argv[3], ofstream::trunc);
-	ofsf.close();
-
-	ofstream ofsfileoutput(argv[3], ofstream::out | ofstream::app);
-#endif
-	vector<InvertedIndex> indexes;
-	indexes.resize(gpuNum);
-
-	double starts, ends;
-
-	string inputFileName(argv[1]);
-
-	printf("Reading file...\n");
-	vector<Entry> entries;
-
-	starts = gettime();
-	FileStats stats = readInputFile(inputFileName, entries);
-	ends = gettime();
-
-	printf("Time taken: %lf seconds\n", ends - starts);
-
-	vector<stringstream*> outputString;
-	//Each thread builds an output string, so it can be flushed at once at the end of the program
-	for (int i = 0; i < numThreads; i++){
-		outputString.push_back(new stringstream);
-	}
-	#pragma omp parallel num_threads(gpuNum)
-	{
-		int cpuid = omp_get_thread_num();
-		cudaSetDevice(cpuid);
-		double start, end;
-
-		start = gettime();
-		indexes[cpuid] = make_inverted_index(stats.num_docs, stats.num_terms, entries.size(), entries);
-		end = gettime();
-
-		#pragma omp single nowait
-		printf("Total time taken for insertion: %lf seconds\n", end - start);
-	}
-
-
-	#pragma omp parallel 
-	{
-		int cpuid = omp_get_thread_num();
-		cudaSetDevice(cpuid / NUM_STREAMS);
-
-		float threshold = atof(argv[2]);
-
-		FileStats lstats = stats;
-
-		processTestFile(indexes[cpuid / NUM_STREAMS], lstats, inputFileName, threshold, *outputString[cpuid]);
-		if (cpuid %  NUM_STREAMS == 0)
-			gpuAssert(cudaDeviceReset());
-
-	}
-
-#if OUTPUT
-		starts = gettime();
-		for (int i = 0; i < numThreads; i++){
-			ofsfileoutput << outputString[i]->str();
-		}
-		ends = gettime();
-
-		printf("Time taken to write output: %lf seconds\n", ends - starts);
-
-		ofsfileoutput.close();
-#endif
-*/
-
-/*void allocVariables(DeviceVariables *dev_vars, float threshold, int num_docs, Similarity** distances) {
-	dim3 grid, threads;
-
-	get_grid_config(grid, threads);
-
-	gpuAssert(cudaMalloc(&dev_vars->d_dist, num_docs * sizeof(Similarity))); // distance between all the docs and the query doc
-	gpuAssert(cudaMalloc(&dev_vars->d_result, num_docs * sizeof(Similarity))); // compacted similarities between all the docs and the query doc
-	gpuAssert(cudaMalloc(&dev_vars->d_sim, num_docs * sizeof(int))); // count of elements in common
-	gpuAssert(cudaMalloc(&dev_vars->d_size_doc, num_docs * sizeof(int))); // size of all docs
-	gpuAssert(cudaMalloc(&dev_vars->d_query, biggestQuerySize * sizeof(Entry))); // query
-	gpuAssert(cudaMalloc(&dev_vars->d_index, biggestQuerySize * sizeof(int)));
-	gpuAssert(cudaMalloc(&dev_vars->d_count, biggestQuerySize * sizeof(int)));
-
-	*distances = (Similarity*)malloc(num_docs * sizeof(Similarity));
-
-	int blocksize = 1024;
-	int numBlocks = num_docs / blocksize + (num_docs % blocksize ? 1 : 0);
-
-	gpuAssert(cudaMalloc(&dev_vars->d_bC,sizeof(int)*(numBlocks + 1)));
-	gpuAssert(cudaMalloc(&dev_vars->d_bO,sizeof(int)*numBlocks));
-
-}
-
-void freeVariables(DeviceVariables *dev_vars, InvertedIndex &index, Similarity** distances){
-	cudaFree(dev_vars->d_dist);
-	cudaFree(dev_vars->d_result);
-	cudaFree(dev_vars->d_sim);
-	cudaFree(dev_vars->d_size_doc);
-	cudaFree(dev_vars->d_query);
-	cudaFree(dev_vars->d_index);
-	cudaFree(dev_vars->d_count);
-	cudaFree(dev_vars->d_bC);
-	cudaFree(dev_vars->d_bO);
-
-	free(*distances);
-
-	if (omp_get_thread_num() % NUM_STREAMS == 0){
-		cudaFree(index.d_count);
-		cudaFree(index.d_index);
-		cudaFree(index.d_inverted_index);
-		cudaFree(index.d_entries);
-	}
-}*/

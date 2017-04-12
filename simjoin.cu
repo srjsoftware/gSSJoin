@@ -71,7 +71,7 @@ __host__ int findSimilars(InvertedIndex index, float threshold, struct DeviceVar
 	calculateIntersection<<<grid, threads>>>(index, intersection, probes, starts, sizes, block_start, block_size,
 			probes_offset, indexed_offset, threshold);
 
-	// calculate Jaccard Similarity and store similars in pairs
+	// calculate Jaccard Similarity and store similar pairs in array pairs
 	calculateJaccardSimilarity<<<grid, threads>>>(intersection, pairs, intersection + intersection_size, sizes,
 			intersection_size, block_start, indexed_offset, block_size, indexed_block_size, threshold);
 
@@ -113,7 +113,6 @@ __global__ void calculateJaccardSimilarity(int *intersection, Pair *pairs, int *
 		float threshold) {
 	int i = blockIdx.x*blockDim.x + threadIdx.x;
 
-	// TODO: filtrar menores que ele msm
 	for (; i < intersection_size; i += gridDim.x*blockDim.x) {
 		int x = i/block_size + probes_offset;
 		int y = i%indexed_block_size + indexed_offset;
