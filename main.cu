@@ -63,10 +63,11 @@ int main(int argc, char **argv) {
 	vector<Entry> entries;
 	InvertedIndex index;
 	Pair *similar_pairs;
+	float threshold = atof(argv[2]);
 
 	string inputFileName(argv[1]);
 	FileStats stats = readInputFile(inputFileName, entries);
-	float threshold = atof(argv[2]);
+	printf("Reading file %s...\n", inputFileName.c_str());
 
 	ofstream ofsf(argv[3], ofstream::trunc);
 	ofsf.close();
@@ -75,6 +76,8 @@ int main(int argc, char **argv) {
 
 	int block_size = 5;
 	int block_num = ceil((float) stats.num_sets / block_size);
+
+	double start = gettime();
 
 	allocVariables(&dev_vars, &similar_pairs, stats.num_terms, block_size, entries.size(), stats.num_sets);
 	gpuAssert(cudaMemcpy(dev_vars.d_starts, &stats.start[0], stats.num_sets * sizeof(int), cudaMemcpyHostToDevice));
@@ -98,24 +101,30 @@ int main(int argc, char **argv) {
 			int probe_block_size = last_probe - probe_block_start + 1;
 			int probes_offset = stats.start[probe_block_start];
 
+			// size filtering
+			if (stats.sizes[last_probe] < threshold * stats.sizes[entries_block_start])
+				continue;
+
 			if (j < i) {
 				int probes_size = stats.start[last_probe] + stats.sizes[last_probe] - probes_offset;
 				gpuAssert(cudaMemcpy(dev_vars.d_probes, &entries[probes_offset], probes_size * sizeof(Entry), cudaMemcpyHostToDevice));
 			}
-			printf("=========Probe Block %d=========\nprobe_block_start = %d\nprobe_offset: %d\nlast_probe: %d\nprobe_block_size: %d\n===============================\n", j, probe_block_start, probes_offset,last_probe, probe_block_size);
-
+			//printf("=========Probe Block %d=========\nprobe_block_start = %d\nprobe_offset: %d\nlast_probe: %d\nprobe_block_size: %d\n===============================\n", j, probe_block_start, probes_offset,last_probe, probe_block_size);
 
 			int totalSimilars = findSimilars(index, threshold, &dev_vars, similar_pairs, probe_block_start,
 					probe_block_size, probes_offset, entries_block_size, entries_block_start, i, j);
 
-			printf("\ntotalSimilars: %d", totalSimilars);
 			//print_intersection(dev_vars.d_intersection, block_size, i, j);
-			print_result(similar_pairs, totalSimilars);
-			// TODO escrever em disco
+			//print_result(similar_pairs, totalSimilars);
+
 			write_output(similar_pairs, totalSimilars, outputstring);
 		}
 
 	}
+
+	double end = gettime();
+
+	printf("Time to process similarity join between %d sets: %lf seconds\n", stats.num_sets, end - start);
 
 	ofsfileoutput << outputstring.str();
 	ofsfileoutput.close();

@@ -27,8 +27,6 @@
 
 
 __host__ InvertedIndex make_inverted_index(int num_docs, int num_terms, int size_entries, int entries_offset, vector<Entry> &entries, struct DeviceVariables *dev_vars) {
-	#pragma omp single nowait
-	printf("Creating inverted index... \n");
 	Entry *d_entries = dev_vars->d_entries, *d_inverted_index = dev_vars->d_inverted_index;
 	int *d_count = dev_vars->d_count, *d_index = dev_vars->d_index;
 
@@ -53,8 +51,6 @@ __host__ InvertedIndex make_inverted_index(int num_docs, int num_terms, int size
 
 	double end = gettime();
 
-	#pragma omp single nowait
-	printf("Time for insertion: %lf\n", end - start);
 	return InvertedIndex(d_inverted_index, d_index, d_count, d_entries, num_docs, size_entries, num_terms);
 }
 
