@@ -83,8 +83,6 @@ __host__ int findSimilars(InvertedIndex index, float threshold, struct DeviceVar
 
 __global__ void calculateIntersection(InvertedIndex index, int *intersection, Entry *probes, int *set_starts,
 		int *set_sizes, int block_start, int block_size, int probes_offset, int indexed_offset, float threshold) {
-	// TODO: diferenciar block_size do tamanho escolhido msm
-
 	for (int i = blockIdx.x; i < block_size; i += gridDim.x) { // percorre os probe sets
 		int probe_id = i + block_start; // setid_offset
 		int probe_start = set_starts[probe_id] - probes_offset; // offset da entrada

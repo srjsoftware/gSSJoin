@@ -56,24 +56,30 @@ void write_output(Pair *similar_pairs, int totalSimilars, stringstream &outputfi
  */
 int main(int argc, char **argv) {
 
-	if (argc != 5) {
-		cerr << "Wrong parameters. Correct usage: <executable> <input_file> <threshold> <output_file> <number_of_gpus>" << endl;
+	if (argc != 6) {
+		cerr << "Wrong parameters. Correct usage: <executable> <input_file> <threshold> <output_file> <number_of_gpus> <size of blocks>" << endl;
 		exit(1);
 	}
-	DeviceVariables dev_vars;
+
 	vector<Entry> entries;
-	InvertedIndex index;
-	Pair *similar_pairs;
 	float threshold = atof(argv[2]);
+	int gpuNum;
+
+	cudaGetDeviceCount(&gpuNum);
+	if (gpuNum > atoi(argv[4]) && atoi(argv[4]) > 0)
+		gpuNum = atoi(argv[4]);
+	omp_set_num_threads(gpuNum);
 
 	string inputFileName(argv[1]);
-	FileStats stats = readInputFile(inputFileName, entries);
 	printf("Reading file %s...\n", inputFileName.c_str());
+	FileStats stats = readInputFile(inputFileName, entries);
 
 	ofstream ofsf(argv[3], ofstream::trunc);
 	ofsf.close();
-	stringstream outputstring;
 	ofstream ofsfileoutput(argv[3], ofstream::out | ofstream::app);
+	vector<stringstream*> outputString; // Each thread has an output string.
+	for (int i = 0; i < gpuNum; i++)
+		outputString.push_back(new stringstream);
 
 	// calculating maximum size of data structures
 	size_t free_mem, total_mem;
@@ -82,60 +88,72 @@ int main(int argc, char **argv) {
 	long sizeVectorsN = stats.num_sets*sizeof(int);
 	long freeMem = free_mem - 3*sizeEntries - sizeVectorsN*4;
 
-	int block_size = freeMem / (stats.num_sets*(sizeof(float) + sizeof(Pair)));
+	int block_size = atoi(argv[5]);
+	block_size = block_size < 1? freeMem / (stats.num_sets*(sizeof(float) + sizeof(Pair))): block_size;
 	block_size = block_size > stats.num_sets? stats.num_sets: block_size;
 	int block_num = ceil((float) stats.num_sets / block_size);
 
 	double start = gettime();
 
-	allocVariables(&dev_vars, &similar_pairs, stats.num_terms, block_size, entries.size(), stats.num_sets);
-	gpuAssert(cudaMemcpy(dev_vars.d_starts, &stats.start[0], stats.num_sets * sizeof(int), cudaMemcpyHostToDevice));
-	gpuAssert(cudaMemcpy(dev_vars.d_sizes, &stats.sizes[0], stats.num_sets * sizeof(int), cudaMemcpyHostToDevice));
+	#pragma omp parallel num_threads(gpuNum)
+	{
+		int gpuid = omp_get_thread_num();
+		cudaSetDevice(gpuid);
+		InvertedIndex index;
+		DeviceVariables dev_vars;
+		Pair *similar_pairs;
 
-	for (int i = 0; i < block_num; i++) {
-		int entries_block_start = i*block_size;
-		int entries_offset = stats.start[entries_block_start];
-		int last_set = entries_block_start + block_size >= stats.num_sets? stats.num_sets - 1: entries_block_start + block_size - 1;
-		int entries_block_size = last_set - entries_block_start + 1;
-		int entries_size = stats.start[last_set] + stats.sizes[last_set] - entries_offset;
-		//printf("=========Indexed Block %d=========\nset_offset = %d\nentrie_offset: %d\nlast_set: %d\nentries_size: %d\n", i, entries_block_start, entries_offset, last_set, entries_size);
+		allocVariables(&dev_vars, &similar_pairs, stats.num_terms, block_size, entries.size(), stats.num_sets);
+		gpuAssert(cudaMemcpy(dev_vars.d_starts, &stats.start[0], stats.num_sets * sizeof(int), cudaMemcpyHostToDevice));
+		gpuAssert(cudaMemcpy(dev_vars.d_sizes, &stats.sizes[0], stats.num_sets * sizeof(int), cudaMemcpyHostToDevice));
 
-		// build the inverted index for block i of size block_size
-		index = make_inverted_index(stats.num_sets, stats.num_terms, entries_size, entries_offset, entries, &dev_vars);
-		//print_sets(entries, stats.sizes, stats.start); //print_invertedIndex(index);
+		for (int i = gpuid; i < block_num; i+= gpuNum) {
+			int entries_block_start = i*block_size;
+			int entries_offset = stats.start[entries_block_start];
+			int last_set = entries_block_start + block_size >= stats.num_sets? stats.num_sets - 1: entries_block_start + block_size - 1;
+			int entries_block_size = last_set - entries_block_start + 1;
+			int entries_size = stats.start[last_set] + stats.sizes[last_set] - entries_offset;
+			//printf("=========Indexed Block %d=========\nset_offset = %d\nentrie_offset: %d\nlast_set: %d\nentries_size: %d\n", i, entries_block_start, entries_offset, last_set, entries_size);
 
-		for (int j = 0; j <= i; j++) { // calculate similarity between indexed sets and probe sets
-			int probe_block_start = j*block_size;
-			int last_probe = probe_block_start + block_size > stats.num_sets? stats.num_sets - 1: probe_block_start + block_size - 1;
-			int probe_block_size = last_probe - probe_block_start + 1;
-			int probes_offset = stats.start[probe_block_start];
+			// build the inverted index for block i of size block_size
+			index = make_inverted_index(stats.num_sets, stats.num_terms, entries_size, entries_offset, entries, &dev_vars);
+			//print_sets(entries, stats.sizes, stats.start); //print_invertedIndex(index);
 
-			// size filtering
-			if (stats.sizes[last_probe] < threshold * stats.sizes[entries_block_start])
-				continue;
+			for (int j = 0; j <= i; j++) { // calculate similarity between indexed sets and probe sets
+				int probe_block_start = j*block_size;
+				int last_probe = probe_block_start + block_size > stats.num_sets? stats.num_sets - 1: probe_block_start + block_size - 1;
+				int probe_block_size = last_probe - probe_block_start + 1;
+				int probes_offset = stats.start[probe_block_start];
 
-			if (j < i) {
-				int probes_size = stats.start[last_probe] + stats.sizes[last_probe] - probes_offset;
-				gpuAssert(cudaMemcpy(dev_vars.d_probes, &entries[probes_offset], probes_size * sizeof(Entry), cudaMemcpyHostToDevice));
+				// size filtering
+				if (stats.sizes[last_probe] < threshold * stats.sizes[entries_block_start])
+					continue;
+
+				if (j < i) {
+					int probes_size = stats.start[last_probe] + stats.sizes[last_probe] - probes_offset;
+					gpuAssert(cudaMemcpy(dev_vars.d_probes, &entries[probes_offset], probes_size * sizeof(Entry), cudaMemcpyHostToDevice));
+				}
+				//printf("=========Probe Block %d=========\nprobe_block_start = %d\nprobe_offset: %d\nlast_probe: %d\nprobe_block_size: %d\n===============================\n", j, probe_block_start, probes_offset,last_probe, probe_block_size);
+
+				int totalSimilars = findSimilars(index, threshold, &dev_vars, similar_pairs, probe_block_start,
+						probe_block_size, probes_offset, entries_block_size, entries_block_start, i, j);
+
+				//print_intersection(dev_vars.d_intersection, block_size, i, j);
+				//print_result(similar_pairs, totalSimilars);
+				write_output(similar_pairs, totalSimilars, *outputString[gpuid]);
 			}
-			//printf("=========Probe Block %d=========\nprobe_block_start = %d\nprobe_offset: %d\nlast_probe: %d\nprobe_block_size: %d\n===============================\n", j, probe_block_start, probes_offset,last_probe, probe_block_size);
 
-			int totalSimilars = findSimilars(index, threshold, &dev_vars, similar_pairs, probe_block_start,
-					probe_block_size, probes_offset, entries_block_size, entries_block_start, i, j);
-
-			//print_intersection(dev_vars.d_intersection, block_size, i, j);
-			//print_result(similar_pairs, totalSimilars);
-
-			write_output(similar_pairs, totalSimilars, outputstring);
 		}
 
+		freeVariables(&dev_vars, &similar_pairs);
 	}
 
 	double end = gettime();
 
 	printf("Time to process similarity join between %d sets: %lf seconds\n", stats.num_sets, end - start);
 
-	ofsfileoutput << outputstring.str();
+	for (int i = 0; i < gpuNum; i++)
+		ofsfileoutput << outputString[i]->str();
 	ofsfileoutput.close();
 
 	return 0;
