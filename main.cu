@@ -46,14 +46,13 @@
 using namespace std;
 
 struct FileStats {
-	int num_docs;
+	int num_sets;
 	int num_terms;
 
 	vector<int> sizes; // set sizes
-	map<int, int> doc_to_class;
 	vector<int> start; // beginning of each entrie
 
-	FileStats() : num_docs(0), num_terms(0) {}
+	FileStats() : num_sets(0), num_terms(0) {}
 };
 
 FileStats readInputFile(string &file, vector<Entry> &entries);
@@ -128,7 +127,7 @@ int main(int argc, char **argv) {
 		double start, end;
 
 		start = gettime();
-		indexes[cpuid] = make_inverted_index(stats.num_docs, stats.num_terms, entries);
+		indexes[cpuid] = make_inverted_index(stats.num_sets, stats.num_terms, entries);
 		end = gettime();
 
 		#pragma omp single nowait
@@ -195,30 +194,30 @@ FileStats readInputFile(string &filename, vector<Entry> &entries) {
 		doc_id++;
 	}
 
-	stats.num_docs = num_tests;
+	stats.num_sets = num_tests;
 
 	input.close();
 
 	return stats;
 }
 
-void allocVariables(DeviceVariables *dev_vars, float threshold, int num_docs, Similarity** distances){
+void allocVariables(DeviceVariables *dev_vars, float threshold, int num_sets, Similarity** distances){
 	dim3 grid, threads;
 
 	get_grid_config(grid, threads);
 
-	gpuAssert(cudaMalloc(&dev_vars->d_dist, num_docs * sizeof(Similarity))); // distance between all the docs and the query doc
-	gpuAssert(cudaMalloc(&dev_vars->d_result, num_docs * sizeof(Similarity))); // compacted similarities between all the docs and the query doc
-	gpuAssert(cudaMalloc(&dev_vars->d_sim, num_docs * sizeof(int))); // count of elements in common
-	gpuAssert(cudaMalloc(&dev_vars->d_size_doc, num_docs * sizeof(int))); // size of all docs
+	gpuAssert(cudaMalloc(&dev_vars->d_dist, num_sets * sizeof(Similarity))); // distance between all the sets and the query doc
+	gpuAssert(cudaMalloc(&dev_vars->d_result, num_sets * sizeof(Similarity))); // compacted similarities between all the sets and the query doc
+	gpuAssert(cudaMalloc(&dev_vars->d_sim, num_sets * sizeof(int))); // count of elements in common
+	gpuAssert(cudaMalloc(&dev_vars->d_sizes, num_sets * sizeof(int))); // size of all sets
 	gpuAssert(cudaMalloc(&dev_vars->d_query, biggestQuerySize * sizeof(Entry))); // query
 	gpuAssert(cudaMalloc(&dev_vars->d_index, biggestQuerySize * sizeof(int)));
 	gpuAssert(cudaMalloc(&dev_vars->d_count, biggestQuerySize * sizeof(int)));
 
-	*distances = (Similarity*)malloc(num_docs * sizeof(Similarity));
+	*distances = (Similarity*)malloc(num_sets * sizeof(Similarity));
 
 	int blocksize = 1024;
-	int numBlocks = num_docs / blocksize + (num_docs % blocksize ? 1 : 0);
+	int numBlocks = num_sets / blocksize + (num_sets % blocksize ? 1 : 0);
 
 	gpuAssert(cudaMalloc(&dev_vars->d_bC,sizeof(int)*(numBlocks + 1)));
 	gpuAssert(cudaMalloc(&dev_vars->d_bO,sizeof(int)*numBlocks));
@@ -229,7 +228,7 @@ void freeVariables(DeviceVariables *dev_vars, InvertedIndex &index, Similarity**
 	cudaFree(dev_vars->d_dist);
 	cudaFree(dev_vars->d_result);
 	cudaFree(dev_vars->d_sim);
-	cudaFree(dev_vars->d_size_doc);
+	cudaFree(dev_vars->d_sizes);
 	cudaFree(dev_vars->d_query);
 	cudaFree(dev_vars->d_index);
 	cudaFree(dev_vars->d_count);
@@ -242,14 +241,12 @@ void freeVariables(DeviceVariables *dev_vars, InvertedIndex &index, Similarity**
 		cudaFree(index.d_count);
 		cudaFree(index.d_index);
 		cudaFree(index.d_inverted_index);
-		cudaFree(index.d_norms);
-		cudaFree(index.d_normsl1);
 	}
 }
 
 void processTestFile(InvertedIndex &index, FileStats &stats, string &filename, float threshold, stringstream &outputfile) {
 
-	int num_test_local = 0, docid;
+	int num_test_local = 0, setid;
 
 	//#pragma omp single nowait
 	printf("Processing input file %s...\n", filename.c_str());
@@ -257,22 +254,22 @@ void processTestFile(InvertedIndex &index, FileStats &stats, string &filename, f
 	DeviceVariables dev_vars;
 	Similarity* distances;
 
-	allocVariables(&dev_vars, threshold, index.num_docs, &distances);
+	allocVariables(&dev_vars, threshold, index.num_sets, &distances);
 
-	cudaMemcpyAsync(dev_vars.d_size_doc, &stats.sizes[0], index.num_docs * sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpyAsync(dev_vars.d_sizes, &stats.sizes[0], index.num_sets * sizeof(int), cudaMemcpyHostToDevice);
 
 	double start = gettime();
 
 #pragma omp for
-	for (docid = 0; docid < index.num_docs - 1; docid++){
+	for (setid = 0; setid < index.num_sets - 1; setid++){
 
 		num_test_local++;
 
-		int totalSimilars = findSimilars(index, threshold, &dev_vars, distances, docid, stats.start[docid], stats.sizes[docid]);
+		int totalSimilars = findSimilars(index, threshold, &dev_vars, distances, setid, stats.start[setid], stats.sizes[setid]);
 
 		for (int i = 0; i < totalSimilars; i++) {
 #if OUTPUT
-			outputfile << "(" << docid << ", " << distances[i].doc_id << "): " << distances[i].distance << endl;
+			outputfile << "(" << setid << ", " << distances[i].set_id << "): " << distances[i].similarity << endl;
 #endif
 		}
 
@@ -291,5 +288,4 @@ void processTestFile(InvertedIndex &index, FileStats &stats, string &filename, f
 	{
 		printf("Time taken for %d queries: %lf seconds\n\n", num_tests, end - start);
 	}
-
 }

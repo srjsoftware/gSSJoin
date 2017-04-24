@@ -47,7 +47,7 @@ struct is_bigger_than_threshold
 	__host__ __device__
 	bool operator()(const Similarity &reg)
 	{
-		return (reg.distance > threshold);
+		return (reg.similarity > threshold);
 	}
 };
 
@@ -58,13 +58,13 @@ __host__ int findSimilars(InvertedIndex inverted_index, float threshold, struct 
 	dim3 grid, threads;
 	get_grid_config(grid, threads);
 
-	int num_docs = inverted_index.num_docs - docid - 1;
-	int *d_count = dev_vars->d_count, *d_index = dev_vars->d_index, *d_sim = dev_vars->d_sim, *size_doc = dev_vars->d_size_doc;
+	int num_sets = inverted_index.num_sets - docid - 1;
+	int *d_count = dev_vars->d_count, *d_index = dev_vars->d_index, *d_sim = dev_vars->d_sim, *size_doc = dev_vars->d_sizes;
 	int *d_BlocksCount = dev_vars->d_bC, *d_BlocksOffset = dev_vars->d_bO;
 	Entry *d_query = inverted_index.d_entries + querystart;
 	Similarity *d_similarity = dev_vars->d_dist, *d_result = dev_vars->d_result;
 
-	gpuAssert(cudaMemset(d_sim + docid + 1, 0, num_docs*sizeof(int)));
+	gpuAssert(cudaMemset(d_sim + docid + 1, 0, num_sets*sizeof(int)));
 
 	get_term_count_and_tf_idf<<<grid, threads>>>(inverted_index, d_query, d_count, querysize);
 
@@ -74,12 +74,12 @@ __host__ int findSimilars(InvertedIndex inverted_index, float threshold, struct 
 
 	calculateJaccardSimilarity<<<grid, threads>>>(inverted_index, d_query, d_index, d_sim, querysize, docid);
 
-	filter_registers<<<grid, threads>>>(d_sim, threshold, querysize, docid, inverted_index.num_docs, size_doc, d_similarity);
+	filter_registers<<<grid, threads>>>(d_sim, threshold, querysize, docid, inverted_index.num_sets, size_doc, d_similarity);
 
 	int blocksize = 1024;
-	int numBlocks = cuCompactor::divup(num_docs, blocksize);
+	int numBlocks = cuCompactor::divup(num_sets, blocksize);
 
-	int totalSimilars = cuCompactor::compact2<Similarity>(d_similarity + docid + 1, d_result, num_docs, is_bigger_than_threshold(threshold), blocksize, numBlocks, d_BlocksCount, d_BlocksOffset);
+	int totalSimilars = cuCompactor::compact2<Similarity>(d_similarity + docid + 1, d_result, num_sets, is_bigger_than_threshold(threshold), blocksize, numBlocks, d_BlocksCount, d_BlocksOffset);
 
 	if (totalSimilars) cudaMemcpyAsync(distances, d_result, sizeof(Similarity)*totalSimilars, cudaMemcpyDeviceToHost);
 
@@ -122,8 +122,8 @@ __global__ void calculateJaccardSimilarity(InvertedIndex inverted_index, Entry *
 		int idx2 = inverted_index.d_index[entry.term_id] - offset;
 		Entry index_entry = inverted_index.d_inverted_index[idx2];
 
-		if (index_entry.doc_id > docid) {
-			atomicAdd(&dist[index_entry.doc_id], 1);
+		if (index_entry.set_id > docid) {
+			atomicAdd(&dist[index_entry.set_id], 1);
 		}
 	}
 }
@@ -142,7 +142,7 @@ __global__ void get_term_count_and_tf_idf(InvertedIndex inverted_index, Entry *q
 		Entry entry = query[i];
 
 		int idf = inverted_index.d_count[entry.term_id];
-		//query[i].tf_idf = entry.tf * log(inverted_index.num_docs / float(max(1, idf)));
+		//query[i].tf_idf = entry.tf * log(inverted_index.num_sets / float(max(1, idf)));
 		count[i] = idf;
 		//atomicAdd(d_qnorm, query[i].tf_idf * query[i].tf_idf);
 		//atomicAdd(d_qnorml1, query[i].tf_idf);
@@ -163,7 +163,7 @@ __global__ void filter_registers(int *sim, float threshold, int querysize, int d
 	for (int i = threadIdx.x; i < size; i += blockDim.x) {
 		float jac = sim[i]/ (float) (querysize + doc_size[i] - sim[i]);
 
-		similars[i].doc_id = offset + i;
-		similars[i].distance = jac;
+		similars[i].set_id = offset + i;
+		similars[i].similarity = jac;
 	}
 }
