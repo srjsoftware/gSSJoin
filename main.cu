@@ -177,6 +177,7 @@ FileStats readInputFile(string &filename, vector<Entry> &entries) {
 		if (line == "") continue;
 
 		vector<string> tokens = split(line, ' ');
+		biggestQuerySize = max((int)tokens.size(), biggestQuerySize);
 
 		int size = tokens.size();
 		stats.sizes.push_back(size);
