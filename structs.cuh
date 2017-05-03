@@ -1,6 +1,6 @@
 /*********************************************************************
 11	
-12	 Copyright (C) 2015 by Wisllay Vitrio
+12	 Copyright (C) 2017 Sidney Ribeiro Junior
 13	
 14	 This program is free software; you can redistribute it and/or modify
 15	 it under the terms of the GNU General Public License as published by
@@ -31,31 +31,13 @@
 struct Entry {
     int set_id;
     int term_id;
-    int tf;
-    float tf_idf;
 
-    __host__ __device__ Entry(int set_id, int term_id, int tf = 0, float tf_idf = 0.0) : set_id(set_id), term_id(term_id), tf(tf), tf_idf(tf_idf) {}
-
-    bool operator < (const Entry& e) const {
-        if(set_id != e.set_id) return set_id < e.set_id;
-        return term_id < e.term_id;
-    }
+    __host__ __device__ Entry(int doc_id, int term_id) : set_id(doc_id), term_id(term_id) {}
 };
 
 struct Similarity {
     int set_id;
     float similarity;
-
-    Similarity() {}
-    __host__ __device__ Similarity(int set_id, float similarity) : set_id(set_id), similarity(similarity) {}
-
-    __host__ __device__ bool operator < (const Similarity &sim) const {
-        return similarity > sim.similarity;
-    }
-
-    __host__ __device__ bool operator > (const Similarity &sim) const {
-        return similarity < sim.similarity;
-    }
 };
 
 struct DeviceVariables{
